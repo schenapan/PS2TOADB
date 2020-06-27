@@ -35,6 +35,8 @@
 #include "PS2Mouse.h"
 #include "PS2KeyAdvanced.h"
 
+#include "ADBKeyTable.h"
+
 
 /* Keyboard constants  Change to suit your Arduino
    define pins used for data and clock from keyboard */
@@ -44,6 +46,8 @@
 // Ps2 Mouse
 #define PS2DATA 6
 #define PS2CLOCK 7
+
+// Adb bus
 #define ADB 1
 
 //State machine states
@@ -76,11 +80,21 @@ volatile unsigned int time;
 #define INIT_DEVICE_ADDRESS 3
 #define INIT_HANDLER_ID 1
 
+// By default, a keyboard has address 2.
+// This can be changed by the computer.
+// It is stored in register 3.
+#define INIT_KB_DEVICE_ADDRESS 2
+#define INIT_KB_HANDLER_ID 1
+
+
 // Data registers. Register 0 is mouse movement data.
 // Register 3 is device address and status bits.
 // Registers 1 and 2 are unused on most devices.
 volatile byte reg0[2];
 //byte reg3[2];
+
+volatile byte kb_reg0[2];
+volatile byte kb_reg2[2];
 
 volatile byte state = INIT;
 
@@ -124,6 +138,7 @@ typedef union{
   
 
 adbRegister3 reg3;
+adbRegister3 kb_reg3;
 
 #define TLEN 256
 //volatile unsigned int t[TLEN];
@@ -144,6 +159,7 @@ volatile unsigned long int acalls = 0;
 volatile unsigned long int aloops = 0;
 
 volatile byte pending = 0;
+volatile byte kb_pending = 0;
 
 PS2Mouse mouse( PS2CLOCK, PS2DATA );
 PS2KeyAdvanced keyboard;
@@ -168,6 +184,14 @@ void setup(){
   Serial.print( reg3.bits.deviceAddress );
   Serial.print(" Handler ID: " );
   Serial.println( reg3.bits.handlerId );
+  kb_reg3.bytes.b[0] = 0;
+  kb_reg3.bytes.b[1] = 0;
+  kb_reg3.bits.deviceAddress = INIT_KB_DEVICE_ADDRESS;
+  kb_reg3.bits.handlerId = INIT_KB_HANDLER_ID;
+  Serial.print("Starting KB ADB. Device address: ");
+  Serial.print( kb_reg3.bits.deviceAddress );
+  Serial.print(" KB Handler ID: " );
+  Serial.println( kb_reg3.bits.handlerId );
   // Set data direction in
   DDRB &= ~ADB;
   // Enable weak pullup
@@ -194,18 +218,45 @@ void setup(){
 
 void loop(){
 
-  if( keyboard.available( ) )
+  if( !kb_pending && keyboard.available( ) )
   {
     // read the next key
     uint16_t c = keyboard.read( );
     if( c > 0 )
     {
+      uint8_t mac_kb = ADB_KEY_IGNORE;
+      int length = sizeof( adb_key ) / sizeof( adb_key[ 0 ] );
+      for( int index = 0; index < length; index++ )      
+      {
+        if( adb_key[index][1] == (c & 0xFF) )
+        {
+          mac_kb = adb_key[index][0];
+          index = length;
+        }
+      }
+
+      if( ADB_KEY_IGNORE != mac_kb )
+      {
+        kb_reg0[0] = 0xFF;
+        kb_reg0[1] = mac_kb | ((c&PS2_BREAK)>>8);
+
+        kb_reg2[0] = 0; // to modify
+        uint8_t kb_led = keyboard.getLock();
+        kb_reg2[1] = 0xFF;
+        if(!(kb_led & PS2_LOCK_CAPS)) kb_reg2[1] &= ~2;
+        if(!(kb_led & PS2_LOCK_SCROLL)) kb_reg2[1] &= ~4;
+        if(!(kb_led & PS2_LOCK_NUM)) kb_reg2[1] &= ~1;
+        kb_pending = 1;
+      }
+      
       Serial.print( "Value " );
       Serial.print( c, HEX );
       Serial.print( " - Status Bits " );
       Serial.print( c >> 8, HEX );
       Serial.print( "  Code " );
-      Serial.println( c & 0xFF, HEX );
+      Serial.print( c & 0xFF, HEX );
+      Serial.print( ", Mac Code " );
+      Serial.println( mac_kb, HEX );
     }
   }
   
@@ -254,6 +305,7 @@ void loop(){
   Serial.println( reg3.bits.deviceAddress );
   Serial.print( reg3.bytes.b[0], HEX );
   Serial.println( reg3.bytes.b[1], HEX );*/
+  // mouse
   if( command.bits.address == reg3.bits.deviceAddress ){
     //Serial.println("ME!");
     //pending = 1;
@@ -267,6 +319,28 @@ void loop(){
     //TODO: Handle LISTEN and FLUSH here
     
   }
+
+  // keyboard
+  if( command.bits.address == kb_reg3.bits.deviceAddress ){
+    //Serial.println("KB!");
+    if( command.bits.cmd == TALK && command.bits.reg == 0 && kb_pending ){
+      getStopAndTlt();
+      //Serial.print( "Got Tlt. time = " );
+      //Serial.println( time );
+      sendKeybReg0();
+    }
+    else if( command.bits.cmd == TALK && command.bits.reg == 2 && kb_pending ){
+      getStopAndTlt();
+      //Serial.print( "Got Tlt. time = " );
+      //Serial.println( time );
+      sendKeybReg2();
+    }
+    
+    //TODO: Handle LISTEN and FLUSH here
+    
+  }
+
+  
   
   //TODO: Handle global commands here
   
@@ -420,6 +494,39 @@ void sendMouse(){
   ENABLE_CAP_INT
 }
 
+void sendKeybReg0(){
+  // Disable timer interrupts
+  DISABLE_CAP_INT
+  //start bit
+  sendBit( 1 );
+  sendByte( kb_reg0[0] );
+  sendByte( kb_reg0[1] );
+  //sendByte( /*reg0[0] */ 0x00 );
+  //sendByte( /*reg0[1]*/ 0x80 );
+  //stop bit
+  sendBit( 0 );
+  //kb_pending = 0;
+  //Serial.println("M");
+  //re-enable timer interrupt
+  ENABLE_CAP_INT
+}
+
+void sendKeybReg2(){
+  // Disable timer interrupts
+  DISABLE_CAP_INT
+  //start bit
+  sendBit( 1 );
+  sendByte( kb_reg2[0] );
+  sendByte( kb_reg2[1] );
+  //sendByte( /*reg0[0] */ 0x00 );
+  //sendByte( /*reg0[1]*/ 0x80 );
+  //stop bit
+  sendBit( 0 );
+  kb_pending = 0;
+  //Serial.println("M");
+  //re-enable timer interrupt
+  ENABLE_CAP_INT
+}
 
 //TODO: ADD COLLISION DETECTION HERE!
 inline void sendBit( byte b ){
