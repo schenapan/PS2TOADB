@@ -63,6 +63,7 @@
 //ADB commands
 #define TALK 3
 #define LISTEN 2
+#define FLUSH 0
 
 // PS2 Mouse button butmasks
 #define LBUTTON 1
@@ -170,7 +171,7 @@ void setup(){
   endtimes = times + TLEN;
   levels = l;
   endlevels = levels + TLEN;*/
-  Serial.begin(19200);
+  Serial.begin(115200);
   // mouse.initialize();
 
   // Configure the keyboard library
@@ -180,6 +181,8 @@ void setup(){
   reg3.bytes.b[1] = 0;
   reg3.bits.deviceAddress = INIT_DEVICE_ADDRESS;
   reg3.bits.handlerId = INIT_HANDLER_ID;
+//  reg3.bits.exceptionalEvent = 1;
+//  reg3.bits.serviceRequestEnable = 1;
   Serial.print("Starting ADB. Device address: ");
   Serial.print( reg3.bits.deviceAddress );
   Serial.print(" Handler ID: " );
@@ -188,6 +191,8 @@ void setup(){
   kb_reg3.bytes.b[1] = 0;
   kb_reg3.bits.deviceAddress = INIT_KB_DEVICE_ADDRESS;
   kb_reg3.bits.handlerId = INIT_KB_HANDLER_ID;
+//  kb_reg3.bits.exceptionalEvent = 1;
+//  kb_reg3.bits.serviceRequestEnable = 1;
   Serial.print("Starting KB ADB. Device address: ");
   Serial.print( kb_reg3.bits.deviceAddress );
   Serial.print(" KB Handler ID: " );
@@ -218,48 +223,6 @@ void setup(){
 
 void loop(){
 
-  if( !kb_pending && keyboard.available( ) )
-  {
-    // read the next key
-    uint16_t c = keyboard.read( );
-    if( c > 0 )
-    {
-      uint8_t mac_kb = ADB_KEY_IGNORE;
-      int length = sizeof( adb_key ) / sizeof( adb_key[ 0 ] );
-      for( int index = 0; index < length; index++ )      
-      {
-        if( adb_key[index][1] == (c & 0xFF) )
-        {
-          mac_kb = adb_key[index][0];
-          index = length;
-        }
-      }
-
-      if( ADB_KEY_IGNORE != mac_kb )
-      {
-        kb_reg0[0] = 0xFF;
-        kb_reg0[1] = mac_kb | ((c&PS2_BREAK)>>8);
-
-        kb_reg2[0] = 0; // to modify
-        uint8_t kb_led = keyboard.getLock();
-        kb_reg2[1] = 0xFF;
-        if(!(kb_led & PS2_LOCK_CAPS)) kb_reg2[1] &= ~2;
-        if(!(kb_led & PS2_LOCK_SCROLL)) kb_reg2[1] &= ~4;
-        if(!(kb_led & PS2_LOCK_NUM)) kb_reg2[1] &= ~1;
-        kb_pending = 1;
-      }
-      
-      Serial.print( "Value " );
-      Serial.print( c, HEX );
-      Serial.print( " - Status Bits " );
-      Serial.print( c >> 8, HEX );
-      Serial.print( "  Code " );
-      Serial.print( c & 0xFF, HEX );
-      Serial.print( ", Mac Code " );
-      Serial.println( mac_kb, HEX );
-    }
-  }
-  
   //int data[3];
   //printMouseReport(data);
   //delay(200);
@@ -307,13 +270,81 @@ void loop(){
   Serial.println( reg3.bytes.b[1], HEX );*/
   // mouse
   if( command.bits.address == reg3.bits.deviceAddress ){
-    //Serial.println("ME!");
-    //pending = 1;
+    static bool mo_first_time = true;
     if( command.bits.cmd == TALK && command.bits.reg == 0 && pending ){
       getStopAndTlt();
-      //Serial.print( "Got Tlt. time = " );
-      //Serial.println( time );
       sendMouse();
+      // Serial.println("MO: reg0");
+    }
+    else if( command.bits.cmd == TALK && command.bits.reg == 3 && mo_first_time )
+    {
+      mo_first_time = false;
+      getStopAndTlt();
+      sendMouseReg3();
+      Serial.println("MO: reg3");
+    }
+    else if(command.bits.cmd == LISTEN)
+    {
+      uint8_t l_data;
+
+      getHigh();
+      getAttentionSignal();
+      if( state != ATTENTION ) return;
+      getSyncSignal();
+      if( state != SYNC ) return;
+      // Get command byte
+      for( int i = 0; i < 8; i++ ){
+        byte b = getBit();
+        if ( b > 1 ) return;
+        l_data  = ( l_data << 1 ) + b;
+      }      
+      
+      Serial.print("MO: LISTEN reg: ");
+      Serial.print( command.bits.reg, HEX );
+      Serial.print(" ,cmd: ");
+      Serial.print( command.bits.cmd, HEX );
+      Serial.print(" ,addr: ");
+      Serial.print( command.bits.address, HEX );
+      Serial.print(" ,data: ");
+      Serial.println( l_data, HEX );
+        
+    }
+    else if(command.bits.cmd == FLUSH)
+    {
+      uint8_t l_data;
+
+      Serial.println("MO: FLUSH");
+
+      getHigh();
+      getAttentionSignal();
+      if( state != ATTENTION ) return;
+      getSyncSignal();
+      if( state != SYNC ) return;
+      // Get command byte
+      for( int i = 0; i < 8; i++ ){
+        byte b = getBit();
+        if ( b > 1 ) return;
+        l_data  = ( l_data << 1 ) + b;
+      }      
+      
+      Serial.print("MO: FLUSH reg: ");
+      Serial.print( command.bits.reg, HEX );
+      Serial.print(" ,cmd: ");
+      Serial.print( command.bits.cmd, HEX );
+      Serial.print(" ,addr: ");
+      Serial.print( command.bits.address, HEX );
+      Serial.print(" ,data: ");
+      Serial.println( l_data, HEX );
+        
+    }
+    else if( command.bits.reg != 0)
+    {
+      Serial.print("MO: other reg: ");
+      Serial.print( command.bits.reg, HEX );
+      Serial.print(" ,cmd: ");
+      Serial.print( command.bits.cmd, HEX );
+      Serial.print(" ,addr: ");
+      Serial.println( command.bits.address, HEX );
     }
     
     //TODO: Handle LISTEN and FLUSH here
@@ -322,18 +353,56 @@ void loop(){
 
   // keyboard
   if( command.bits.address == kb_reg3.bits.deviceAddress ){
-    //Serial.println("KB!");
+    static bool kb_first_time = true;
     if( command.bits.cmd == TALK && command.bits.reg == 0 && kb_pending ){
       getStopAndTlt();
-      //Serial.print( "Got Tlt. time = " );
-      //Serial.println( time );
       sendKeybReg0();
+      Serial.println("KB: reg0");
     }
     else if( command.bits.cmd == TALK && command.bits.reg == 2 && kb_pending ){
       getStopAndTlt();
-      //Serial.print( "Got Tlt. time = " );
-      //Serial.println( time );
       sendKeybReg2();
+      Serial.println("Kb: reg2");
+    }
+    else if( command.bits.cmd == TALK && command.bits.reg == 3 && kb_first_time ){
+      kb_first_time = false;
+      getStopAndTlt();
+      sendKeybReg3();
+      Serial.println("KB: reg3");
+    }    
+    else if(command.bits.cmd == LISTEN)
+    {
+      uint8_t l_data;
+
+      getHigh();
+      getAttentionSignal();
+      if( state != ATTENTION ) return;
+      getSyncSignal();
+      if( state != SYNC ) return;
+      // Get command byte
+      for( int i = 0; i < 8; i++ ){
+        byte b = getBit();
+        if ( b > 1 ) return;
+        l_data  = ( l_data << 1 ) + b;
+      }  
+            
+      Serial.print("KB: LISTEN reg: ");
+      Serial.print( command.bits.reg, HEX );
+      Serial.print(" ,cmd: ");
+      Serial.print( command.bits.cmd, HEX );
+      Serial.print(" ,addr: ");
+      Serial.print( command.bits.address, HEX );
+      Serial.print(" ,data: ");
+      Serial.println( l_data, HEX );
+    }
+    else /* if( command.bits.reg != 0) */
+    {
+      Serial.print("KB: reg: ");
+      Serial.print( command.bits.reg, HEX );
+      Serial.print(" ,cmd: ");
+      Serial.print( command.bits.cmd, HEX );
+      Serial.print(" ,addr: ");
+      Serial.println( command.bits.address, HEX );
     }
     
     //TODO: Handle LISTEN and FLUSH here
@@ -341,8 +410,8 @@ void loop(){
   }
 
   
-  
   //TODO: Handle global commands here
+  
   
   // Check for new movement/ buttons from the mouse.
   // If there is data pending, don't check, because that would
@@ -350,7 +419,49 @@ void loop(){
   // should accumulate any extra movement that happens
   // during this time.
   if( !pending ) checkMouse();
-  
+
+
+  if( !kb_pending && keyboard.available( ) )
+  {
+    // read the next key
+    uint16_t c = keyboard.read( );
+    if( c > 0 )
+    {
+      uint8_t mac_kb = ADB_KEY_IGNORE;
+      int length = sizeof( adb_key ) / sizeof( adb_key[ 0 ] );
+      for( int index = 0; index < length; index++ )      
+      {
+        if( adb_key[index][1] == (c & 0xFF) )
+        {
+          mac_kb = adb_key[index][0];
+          index = length;
+        }
+      }
+
+      if( ADB_KEY_IGNORE != mac_kb )
+      {
+        kb_reg0[0] = 0xFF;
+        kb_reg0[1] = mac_kb | ((c&PS2_BREAK)>>8);
+
+        kb_reg2[0] = 0; // to modify
+        uint8_t kb_led = keyboard.getLock();
+        kb_reg2[1] = 0xFF;
+        if(!(kb_led & PS2_LOCK_CAPS)) kb_reg2[1] &= ~2;
+        if(!(kb_led & PS2_LOCK_SCROLL)) kb_reg2[1] &= ~4;
+        if(!(kb_led & PS2_LOCK_NUM)) kb_reg2[1] &= ~1;
+        kb_pending = 1;
+      }
+      
+      Serial.print( "Value " );
+      Serial.print( c, HEX );
+      Serial.print( " - Status Bits " );
+      Serial.print( c >> 8, HEX );
+      Serial.print( "  Code " );
+      Serial.print( c & 0xFF, HEX );
+      Serial.print( ", Mac Code " );
+      Serial.println( kb_reg0[1], HEX );
+    }
+  }  
   /*Serial.print( "cb " );
   Serial.println( command.bytes.cmdByte, HEX );*/
   
@@ -484,12 +595,22 @@ void sendMouse(){
   sendBit( 1 );
   sendByte( reg0[0] );
   sendByte( reg0[1] );
-  //sendByte( /*reg0[0] */ 0x00 );
-  //sendByte( /*reg0[1]*/ 0x80 );
   //stop bit
   sendBit( 0 );
   pending = 0;
-  //Serial.println("M");
+  //re-enable timer interrupt
+  ENABLE_CAP_INT
+}
+
+void sendMouseReg3(){
+  // Disable timer interrupts
+  DISABLE_CAP_INT
+  //start bit
+  sendBit( 1 );
+  sendByte( 0x01 /*reg3.bytes.b[0]*/ );
+  sendByte( 0x03 /*reg3.bytes.b[1]*/ );
+  //stop bit
+  sendBit( 0 );
   //re-enable timer interrupt
   ENABLE_CAP_INT
 }
@@ -501,11 +622,9 @@ void sendKeybReg0(){
   sendBit( 1 );
   sendByte( kb_reg0[0] );
   sendByte( kb_reg0[1] );
-  //sendByte( /*reg0[0] */ 0x00 );
-  //sendByte( /*reg0[1]*/ 0x80 );
   //stop bit
   sendBit( 0 );
-  //kb_pending = 0;
+  kb_pending = 0;
   //Serial.println("M");
   //re-enable timer interrupt
   ENABLE_CAP_INT
@@ -518,12 +637,23 @@ void sendKeybReg2(){
   sendBit( 1 );
   sendByte( kb_reg2[0] );
   sendByte( kb_reg2[1] );
-  //sendByte( /*reg0[0] */ 0x00 );
-  //sendByte( /*reg0[1]*/ 0x80 );
   //stop bit
   sendBit( 0 );
   kb_pending = 0;
   //Serial.println("M");
+  //re-enable timer interrupt
+  ENABLE_CAP_INT
+}
+
+void sendKeybReg3(){
+  // Disable timer interrupts
+  DISABLE_CAP_INT
+  //start bit
+  sendBit( 1 );
+  sendByte( 0x01 /*kb_reg3.bytes.b[0]*/ );
+  sendByte( 0x02 /*kb_reg3.bytes.b[1]*/ );
+  //stop bit
+  sendBit( 0 );
   //re-enable timer interrupt
   ENABLE_CAP_INT
 }
@@ -595,14 +725,6 @@ void checkMouse(){
   buttons = data[0] & 0x03;
   if( reg0[0] || reg0[1] || buttons != oldbuttons ){
     pending = 1;
-    /*
-    Serial.print( "Got mouse event. x: ");
-    Serial.print( data[1] );
-    Serial.print( ", y: ");
-    Serial.print( data[2] );
-    Serial.print( ", btns: " );
-    Serial.println( buttons );
-    */
   }
   if ( !(buttons & LBUTTON) ) reg0[0] |= 0x80;
   if ( !(buttons & RBUTTON) ) reg0[1] |= 0x80;
